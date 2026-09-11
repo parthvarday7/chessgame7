@@ -11,12 +11,42 @@ import {
   RoomState,
   TimeControl,
 } from '../types';
+import { P2PGameSession } from '../utils/p2pGame';
 
-const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:4000';
+export function getStoredServerUrl(): string {
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const queryServer = params.get('server');
+    if (queryServer) {
+      try {
+        localStorage.setItem('chess_server_url', queryServer.trim());
+        return queryServer.trim();
+      } catch (e) {}
+    }
+    try {
+      const saved = localStorage.getItem('chess_server_url');
+      if (saved) return saved.trim();
+    } catch (e) {}
+
+    // On HTTPS (e.g. Vercel), do not fallback to http://localhost because browsers block Mixed Content
+    if (window.location.protocol === 'https:' && !process.env.NEXT_PUBLIC_SOCKET_URL) {
+      return '';
+    }
+  }
+  return process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:4000';
+}
 
 export function useChessGame(initialRoomId?: string) {
   const socketRef = useRef<Socket | null>(null);
-  const [connected, setConnected] = useState<boolean>(false);
+  const p2pSessionRef = useRef<P2PGameSession | null>(null);
+
+  const [serverUrl, setServerUrlState] = useState<string>('');
+  // Connected is true by default because P2P WebRTC network is always ready
+  const [connected, setConnected] = useState<boolean>(true);
+  const [isSocketConnected, setIsSocketConnected] = useState<boolean>(false);
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'error' | 'unconfigured'>('connected');
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [yourPlayerId, setYourPlayerId] = useState<string | null>(null);
   const [yourColor, setYourColor] = useState<PieceColor | null>(null);
@@ -40,22 +70,51 @@ export function useChessGame(initialRoomId?: string) {
     }, 5000);
   }, []);
 
-  // Initialize socket connection
+  // Initialize server URL on mount
   useEffect(() => {
-    const socket = io(SOCKET_URL, {
-      transports: ['websocket'],
+    const initialUrl = getStoredServerUrl();
+    setServerUrlState(initialUrl);
+  }, []);
+
+  const setCustomServerUrl = useCallback((newUrl: string) => {
+    const trimmed = newUrl.trim();
+    if (typeof window !== 'undefined') {
+      try {
+        if (trimmed) {
+          localStorage.setItem('chess_server_url', trimmed);
+        } else {
+          localStorage.removeItem('chess_server_url');
+        }
+      } catch (e) {}
+    }
+    setServerUrlState(trimmed);
+  }, []);
+
+  // Socket connection attempt (optional, when backend URL is configured)
+  useEffect(() => {
+    if (!serverUrl) {
+      setIsSocketConnected(false);
+      setConnected(true); // P2P is always ready
+      return;
+    }
+
+    const socket = io(serverUrl, {
+      transports: ['polling', 'websocket'],
       reconnectionAttempts: 10,
-      reconnectionDelay: 1000,
+      reconnectionDelay: 1500,
+      timeout: 10000,
     });
 
     socketRef.current = socket;
 
     socket.on('connect', () => {
+      setIsSocketConnected(true);
       setConnected(true);
-      addNotification('Connected to chess server', 'success');
+      setConnectionStatus('connected');
+      setConnectionError(null);
+      addNotification('Connected to dedicated chess server', 'success');
 
-      // Auto-reconnect if roomId exists and session was stored in localStorage
-      if (initialRoomId) {
+      if (initialRoomId && initialRoomId !== 'LOCAL') {
         const storedSession = localStorage.getItem(`chess_session_${initialRoomId.toUpperCase()}`);
         if (storedSession) {
           try {
@@ -65,16 +124,20 @@ export function useChessGame(initialRoomId?: string) {
               playerId,
               username,
             });
-          } catch (e) {
-            console.error('Failed to parse session:', e);
-          }
+          } catch (e) {}
         }
       }
     });
 
+    socket.on('connect_error', (err) => {
+      setIsSocketConnected(false);
+      // Even if socket fails, P2P network remains ready
+      setConnected(true);
+      setConnectionError(err.message || 'Server offline');
+    });
+
     socket.on('disconnect', () => {
-      setConnected(false);
-      addNotification('Disconnected from server. Reconnecting...', 'warning');
+      setIsSocketConnected(false);
     });
 
     socket.on('room_created', (data: { roomId: string; playerId: string; color: PieceColor }) => {
@@ -100,19 +163,11 @@ export function useChessGame(initialRoomId?: string) {
         if (data.yourPlayerId) setYourPlayerId(data.yourPlayerId);
         if (data.yourColor) setYourColor(data.yourColor);
 
-        // Update local clocks from server
         if (data.roomState.whitePlayer && data.roomState.blackPlayer) {
           setClocks({
             whiteMs: data.roomState.whitePlayer.timeRemainingMs,
             blackMs: data.roomState.blackPlayer.timeRemainingMs,
           });
-        }
-
-        if (data.yourPlayerId && data.roomState.roomId) {
-          localStorage.setItem(
-            `chess_session_${data.roomState.roomId}`,
-            JSON.stringify({ playerId: data.yourPlayerId })
-          );
         }
       }
     );
@@ -131,10 +186,6 @@ export function useChessGame(initialRoomId?: string) {
       setDrawOfferedBy(null);
     });
 
-    socket.on('move_rejected', (data: { error: string }) => {
-      addNotification(`Move rejected: ${data.error}`, 'error');
-    });
-
     socket.on('clock_tick', (data: { whiteTimeMs: number; blackTimeMs: number; turn: PieceColor }) => {
       setClocks({
         whiteMs: data.whiteTimeMs,
@@ -142,51 +193,86 @@ export function useChessGame(initialRoomId?: string) {
       });
     });
 
-    socket.on('player_disconnected', (data: { color: PieceColor; username: string; gracePeriodSeconds: number }) => {
-      addNotification(
-        `${data.username} disconnected. They have ${data.gracePeriodSeconds}s to reconnect.`,
-        'warning'
-      );
-    });
-
-    socket.on('player_reconnected', (data: { color: PieceColor; roomState: RoomState }) => {
-      setRoomState(data.roomState);
-      addNotification(`Player reconnected! Game resumes.`, 'info');
-    });
-
     socket.on('game_over', (data: { details: GameOverDetails; roomState: RoomState }) => {
       setRoomState(data.roomState);
       addNotification(data.details.message, 'info');
     });
 
-    socket.on('draw_offered', (data: { fromColor: PieceColor }) => {
-      setDrawOfferedBy(data.fromColor);
-      addNotification('Opponent offered a draw.', 'info');
-    });
-
-    socket.on('draw_declined', () => {
-      setDrawOfferedBy(null);
-      addNotification('Draw offer was declined.', 'info');
-    });
-
-    socket.on('rematch_offered', (data: { fromColor: PieceColor }) => {
-      setRematchOfferedBy(data.fromColor);
-      addNotification('Opponent offered a rematch!', 'info');
-    });
-
-    socket.on('rematch_started', (data: { roomState: RoomState }) => {
-      setRoomState(data.roomState);
-      setRematchOfferedBy(null);
-      setDrawOfferedBy(null);
-      addNotification('Rematch started! Good luck.', 'success');
-    });
-
-    socket.on('error_message', (data: { message: string }) => {
-      addNotification(data.message, 'error');
-    });
-
     return () => {
       socket.disconnect();
+    };
+  }, [serverUrl, initialRoomId, addNotification]);
+
+  // P2P / WebRTC Session handling when in a game room
+  useEffect(() => {
+    if (!initialRoomId || initialRoomId === 'LOCAL') return;
+
+    // Read stored P2P host configuration if created on this client
+    let isHost = false;
+    let timeControl: TimeControl = { initialMinutes: 3, incrementSeconds: 2 };
+    let preferredColor: 'w' | 'b' | 'random' = 'random';
+    let username = 'Player';
+
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem(`chess_p2p_room_${initialRoomId.toUpperCase()}`);
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored);
+          isHost = Boolean(parsed.isHost);
+          if (parsed.timeControl) timeControl = parsed.timeControl;
+          if (parsed.preferredColor) preferredColor = parsed.preferredColor;
+          if (parsed.username) username = parsed.username;
+        } catch (e) {}
+      }
+    }
+
+    const session = new P2PGameSession(
+      initialRoomId,
+      isHost,
+      username,
+      timeControl,
+      preferredColor
+    );
+    p2pSessionRef.current = session;
+
+    session.onStateUpdate = (state) => {
+      setRoomState({ ...state });
+      setYourColor(session.yourColor);
+      if (state.whitePlayer && state.blackPlayer) {
+        setClocks({
+          whiteMs: state.whitePlayer.timeRemainingMs,
+          blackMs: state.blackPlayer.timeRemainingMs,
+        });
+      }
+    };
+
+    session.onClockTick = (whiteMs, blackMs) => {
+      setClocks({ whiteMs, blackMs });
+    };
+
+    session.onNotification = (msg, type) => {
+      addNotification(msg, type);
+    };
+
+    session.onDrawOffer = (fromColor) => {
+      setDrawOfferedBy(fromColor);
+      addNotification('Opponent offered a draw.', 'info');
+    };
+
+    session.onRematchOffer = (fromColor) => {
+      setRematchOfferedBy(fromColor);
+      addNotification('Opponent offered a rematch!', 'info');
+    };
+
+    // Set initial room state
+    setRoomState(session.roomState);
+    setYourColor(session.yourColor);
+
+    session.start();
+
+    return () => {
+      session.destroy();
+      p2pSessionRef.current = null;
     };
   }, [initialRoomId, addNotification]);
 
@@ -207,31 +293,55 @@ export function useChessGame(initialRoomId?: string) {
     return () => clearInterval(interval);
   }, [roomState?.status, roomState?.turn]);
 
-  // Action dispatches
+  // Actions
   const createRoom = useCallback(
     (timeControl: TimeControl, preferredColor: 'w' | 'b' | 'random' = 'w', username: string = 'Player 1') => {
-      socketRef.current?.emit('create_room', { timeControl, preferredColor, username });
+      if (isSocketConnected && socketRef.current?.connected) {
+        socketRef.current.emit('create_room', { timeControl, preferredColor, username });
+      } else {
+        // P2P instant room code generation
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        let code = '';
+        for (let i = 0; i < 6; i++) {
+          code += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+
+        try {
+          localStorage.setItem(
+            `chess_p2p_room_${code}`,
+            JSON.stringify({
+              roomId: code,
+              isHost: true,
+              timeControl,
+              preferredColor,
+              username,
+            })
+          );
+        } catch (e) {}
+
+        if (typeof window !== 'undefined') {
+          window.location.href = `/game/${code}`;
+        }
+      }
     },
-    []
+    [isSocketConnected]
   );
 
   const joinRoom = useCallback((roomId: string, username: string = 'Player 2') => {
-    const storedSession = localStorage.getItem(`chess_session_${roomId.toUpperCase()}`);
-    let playerId: string | undefined = undefined;
-    if (storedSession) {
-      try {
-        playerId = JSON.parse(storedSession).playerId;
-      } catch (e) {}
+    if (isSocketConnected && socketRef.current?.connected) {
+      socketRef.current.emit('join_room', {
+        roomId: roomId.toUpperCase(),
+        username,
+      });
     }
-    socketRef.current?.emit('join_room', {
-      roomId: roomId.toUpperCase(),
-      username,
-      playerId,
-    });
-  }, []);
+  }, [isSocketConnected]);
 
   const makeMove = useCallback(
     (move: ChessMovePayload) => {
+      if (p2pSessionRef.current) {
+        p2pSessionRef.current.makeMove(move);
+        return;
+      }
       if (!roomState || !yourPlayerId) return;
       socketRef.current?.emit('make_move', {
         roomId: roomState.roomId,
@@ -243,6 +353,10 @@ export function useChessGame(initialRoomId?: string) {
   );
 
   const resign = useCallback(() => {
+    if (p2pSessionRef.current) {
+      p2pSessionRef.current.resign();
+      return;
+    }
     if (!roomState || !yourPlayerId) return;
     socketRef.current?.emit('resign', {
       roomId: roomState.roomId,
@@ -251,6 +365,10 @@ export function useChessGame(initialRoomId?: string) {
   }, [roomState, yourPlayerId]);
 
   const offerDraw = useCallback(() => {
+    if (p2pSessionRef.current) {
+      p2pSessionRef.current.offerDraw();
+      return;
+    }
     if (!roomState || !yourPlayerId) return;
     socketRef.current?.emit('offer_draw', {
       roomId: roomState.roomId,
@@ -261,6 +379,10 @@ export function useChessGame(initialRoomId?: string) {
 
   const respondDraw = useCallback(
     (accept: boolean) => {
+      if (p2pSessionRef.current) {
+        p2pSessionRef.current.respondDraw(accept);
+        return;
+      }
       if (!roomState || !yourPlayerId) return;
       socketRef.current?.emit('respond_draw', {
         roomId: roomState.roomId,
@@ -273,6 +395,10 @@ export function useChessGame(initialRoomId?: string) {
   );
 
   const requestRematch = useCallback(() => {
+    if (p2pSessionRef.current) {
+      p2pSessionRef.current.requestRematch();
+      return;
+    }
     if (!roomState || !yourPlayerId) return;
     socketRef.current?.emit('request_rematch', {
       roomId: roomState.roomId,
@@ -283,7 +409,12 @@ export function useChessGame(initialRoomId?: string) {
 
   return {
     socket: socketRef.current,
+    serverUrl,
+    setCustomServerUrl,
+    connectionStatus,
+    connectionError,
     connected,
+    isSocketConnected,
     roomState,
     yourPlayerId,
     yourColor,

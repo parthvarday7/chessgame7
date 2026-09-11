@@ -1,8 +1,20 @@
 'use client';
 
-import { ArrowRight, Clock, Dices, Play, Plus, Swords, Users } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  Clock,
+  Dices,
+  Play,
+  Plus,
+  Settings,
+  Swords,
+  Users,
+  Wifi,
+} from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useChessGame } from '../hooks/useChessGame';
 import { TimeControl } from '../types';
 
@@ -22,7 +34,15 @@ const PRESET_TIME_CONTROLS: Array<{
 
 export default function LobbyPage() {
   const router = useRouter();
-  const { createRoom, joinRoom, socket, connected } = useChessGame();
+  const {
+    createRoom,
+    socket,
+    connected,
+    serverUrl,
+    connectionStatus,
+    connectionError,
+    setCustomServerUrl,
+  } = useChessGame();
 
   const [username, setUsername] = useState('Grandmaster');
   const [selectedPreset, setSelectedPreset] = useState(2); // 3|2 Blitz by default
@@ -30,6 +50,14 @@ export default function LobbyPage() {
   const [joinRoomCode, setJoinRoomCode] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const [isJoining, setIsJoining] = useState(false);
+  const [isEditingServer, setIsEditingServer] = useState(false);
+  const [customUrlInput, setCustomUrlInput] = useState('');
+
+  useEffect(() => {
+    if (serverUrl) {
+      setCustomUrlInput(serverUrl);
+    }
+  }, [serverUrl]);
 
   const handleCreateGame = () => {
     if (!connected) return;
@@ -177,14 +205,27 @@ export default function LobbyPage() {
             </div>
           </div>
 
-          <button
-            onClick={handleCreateGame}
-            disabled={!connected || isCreating}
-            className="w-full py-3.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 font-bold text-white shadow-lg shadow-blue-500/25 transition active:scale-[0.98] flex items-center justify-center space-x-2"
-          >
-            <Play className="w-4 h-4 fill-white" />
-            <span>{isCreating ? 'Creating Room...' : 'Create Private Room'}</span>
-          </button>
+          <div className="space-y-3">
+            <button
+              onClick={handleCreateGame}
+              disabled={!connected || isCreating}
+              className="w-full py-3.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 font-bold text-white shadow-lg shadow-blue-500/25 transition active:scale-[0.98] flex items-center justify-center space-x-2"
+            >
+              <Play className="w-4 h-4 fill-white" />
+              <span>{isCreating ? 'Creating Room...' : 'Create Private Room'}</span>
+            </button>
+
+            {/* Offline / Pass & Play quick match */}
+            <button
+              type="button"
+              onClick={() => router.push('/game/LOCAL')}
+              className="w-full py-2.5 px-3 rounded-xl bg-slate-900/80 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-white text-xs font-semibold flex items-center justify-center space-x-2 transition"
+            >
+              <Swords className="w-3.5 h-3.5 text-blue-400" />
+              <span>Pass & Play (Local 2-Player Match)</span>
+              <ArrowRight className="w-3 h-3 text-slate-500" />
+            </button>
+          </div>
         </div>
 
         {/* Card 2: Join Game & Quick Info */}
@@ -224,7 +265,7 @@ export default function LobbyPage() {
             </form>
           </div>
 
-          {/* Quick Features Highlight */}
+          {/* Server Status & Configuration Box */}
           <div className="glass-panel p-6 rounded-2xl border border-slate-800 text-xs text-slate-400 space-y-3">
             <div className="flex items-center space-x-2.5 text-slate-300 font-semibold">
               <Clock className="w-4 h-4 text-emerald-400" />
@@ -233,11 +274,108 @@ export default function LobbyPage() {
             <p className="text-slate-400 leading-relaxed">
               Every millisecond is tracked server-side with instantaneous flag-fall detection and automatic increments.
             </p>
-            <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-500">
-              <span>Server Status:</span>
-              <span className={`font-semibold ${connected ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {connected ? 'Online & Ready' : 'Connecting to server...'}
-              </span>
+
+            <div className="pt-2 border-t border-slate-800/80 flex flex-col space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Server Status:</span>
+                <div className="flex items-center space-x-2">
+                  <span
+                    className={`flex items-center space-x-1.5 font-semibold ${
+                      connected
+                        ? 'text-emerald-400'
+                        : connectionStatus === 'unconfigured'
+                        ? 'text-amber-400'
+                        : 'text-rose-400'
+                    }`}
+                  >
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        connected
+                          ? 'bg-emerald-400 animate-pulse'
+                          : connectionStatus === 'unconfigured'
+                          ? 'bg-amber-400'
+                          : 'bg-rose-400 animate-ping'
+                      }`}
+                    />
+                    <span>
+                      {connected
+                        ? 'Online & Ready'
+                        : connectionStatus === 'unconfigured'
+                        ? 'Server URL Required'
+                        : 'Connecting to server...'}
+                    </span>
+                  </span>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomUrlInput(serverUrl || '');
+                      setIsEditingServer(!isEditingServer);
+                    }}
+                    className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition"
+                    title="Configure Backend URL"
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Dynamic Backend URL Connector */}
+              {(!connected || isEditingServer) && (
+                <div className="mt-2 p-3.5 rounded-xl bg-slate-900/90 border border-slate-700/80 text-xs space-y-2.5 animate-in fade-in duration-200">
+                  <div className="flex items-center justify-between text-slate-200 font-semibold">
+                    <span className="flex items-center space-x-1.5">
+                      <Wifi className="w-3.5 h-3.5 text-blue-400" />
+                      <span>Connect to Backend Server</span>
+                    </span>
+                    {connected && (
+                      <span className="text-[10px] text-emerald-400 flex items-center space-x-1">
+                        <CheckCircle2 className="w-3 h-3" />
+                        <span>Connected</span>
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 leading-snug">
+                    Paste your Render backend URL below (e.g.{' '}
+                    <code className="text-blue-300 bg-blue-950/40 px-1 py-0.5 rounded">
+                      https://chess-server-xxxx.onrender.com
+                    </code>
+                    ) to connect instantly without redeploying:
+                  </p>
+
+                  <div className="flex space-x-2">
+                    <input
+                      type="url"
+                      value={customUrlInput}
+                      onChange={(e) => setCustomUrlInput(e.target.value)}
+                      placeholder="https://chess-server-xxxx.onrender.com"
+                      className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs font-mono placeholder-slate-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomServerUrl(customUrlInput);
+                        setIsEditingServer(false);
+                      }}
+                      className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs transition active:scale-95 shadow-md shadow-blue-600/30"
+                    >
+                      Connect
+                    </button>
+                  </div>
+
+                  {connectionError && (
+                    <div className="flex items-start space-x-1.5 text-rose-400 text-[11px] font-mono">
+                      <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                      <span>{connectionError}</span>
+                    </div>
+                  )}
+
+                  <p className="text-[10px] text-slate-500 leading-normal">
+                    💡 <strong>Render Free Tier:</strong> Takes ~30-50 seconds to spin up from sleep. If you deployed recently, give it a moment to wake up.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
