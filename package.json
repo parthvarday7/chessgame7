@@ -1,0 +1,16 @@
+{
+  "name": "chess-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "online-chess/server",
+    "online-chess/client"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev --workspace=online-chess/server",
+    "dev:client": "npm run dev --workspace=online-chess/client",
+    "build:server": "npm run build --workspace=online-chess/server",
+    "build:client": "npm run build --workspace=online-chess/client",
+    "test:sim": "npm run test:sim --workspace=online-chess/server"
+  }
+}
